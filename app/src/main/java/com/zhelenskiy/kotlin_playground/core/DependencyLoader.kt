@@ -98,7 +98,7 @@ private suspend fun getVersionState(
     metadata: CompilerMetadata
 ): VersionState = withContext(Dispatchers.IO) {
     val jar = File(applicationContext.filesDir, "compiler/${metadata.version}.jar")
-    if (jar.isFile) VersionState.Downloaded(jar) else VersionState.NotLoaded
+    if (jar.isFile) VersionState.Downloaded(jar) else VersionState.NotDownloaded
 }
 
 
@@ -110,3 +110,17 @@ private suspend fun getLoadedVersions(applicationContext: Context): List<Compile
 
 suspend fun getLoadedVersionsWithState(applicationContext: Context): Map<CompilerMetadata, VersionState>? =
     getLoadedVersions(applicationContext)?.associateWith { getVersionState(applicationContext, it) }
+
+suspend fun saveCurrentCompiler(applicationContext: Context, compilerMetadata: CompilerMetadata?) =
+    withContext(Dispatchers.IO) {
+        val compilersDirectory = File(applicationContext.filesDir, "compiler/")
+        compilersDirectory.mkdirs()
+        File(compilersDirectory, "chosen.txt").writeText(Json.encodeToString(compilerMetadata))
+    }
+
+suspend fun getCurrentCompiler(applicationContext: Context): CompilerMetadata? =
+    withContext(Dispatchers.IO) {
+        val compilersDirectory = File(applicationContext.filesDir, "compiler/")
+        val file = File(compilersDirectory, "chosen.txt")
+        runCatching { Json.decodeFromString<CompilerMetadata?>(file.readText()) }.getOrNull()
+    }

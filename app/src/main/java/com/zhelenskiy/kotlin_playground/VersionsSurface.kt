@@ -1,5 +1,8 @@
 package com.zhelenskiy.kotlin_playground
 
+import android.content.Context
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -29,7 +32,8 @@ class UpdateVersionsToken
 @Composable
 fun VersionsSurface(
     token: UpdateVersionsToken,
-    initialVersions: Map<CompilerMetadata, VersionState>? = null
+    initialVersions: Map<CompilerMetadata, VersionState>? = null,
+    chosen: CompilerMetadata? = null,
 ) {
     val versionStates: SnapshotStateMap<CompilerMetadata, VersionState> = remember(token) {
         if (initialVersions == null) mutableStateMapOf()
@@ -46,9 +50,9 @@ fun VersionsSurface(
         val newStates = newVersions.associateWith {
             async(Dispatchers.IO) {
                 when (val state = oldStates[it]) {
-                    null -> NotLoaded
-                    is Downloaded -> if (checkExists(state.path)) state else NotLoaded
-                    Cancelling, is Downloading, NotLoaded, Removing -> state
+                    null -> NotDownloaded
+                    is Downloaded -> if (checkExists(state.path)) state else NotDownloaded
+                    Cancelling, is Downloading, NotDownloaded, Removing -> state
                 }
             }
         }.mapValues { (_, v) -> v.await() }
@@ -56,7 +60,7 @@ fun VersionsSurface(
         versionStates.putAll(newStates)
         for (oldState in oldStates.filterKeys { it !in versionStates }.values) {
             when (oldState) {
-                Cancelling, NotLoaded, Removing -> Unit
+                Cancelling, NotDownloaded, Removing -> Unit
                 is Downloaded -> coroutineScope.launch { removeVersion(oldState.path) }
                 is Downloading -> oldState.job.cancel()
             }
@@ -68,12 +72,14 @@ fun VersionsSurface(
     val refreshState = rememberPullRefreshState(refreshing = refreshing, onRefresh = {
         coroutineScope.launch { loadKotlinVersionsVisually() }
     })
+    var chosenCompiler by remember { mutableStateOf(chosen.takeIf { it in versionStates }) }
     if (initialVersions == null) {
         LaunchedEffect(key1 = token) {
             getLoadedVersionsWithState(localContext)?.let {
                 versionStates.clear()
                 versionStates.putAll(it)
             } ?: loadKotlinVersionsVisually()
+            chosenCompiler = getCurrentCompiler(localContext).takeIf { it in versionStates }
         }
     }
     if (versionStates.isEmpty()) return
@@ -94,11 +100,22 @@ fun VersionsSurface(
                 )
             }
             items(versionStates.entries.sortedByDescending { it.key.timestamp }) { (compilerMetadata, state) ->
-                DrawVersion(compilerMetadata, state, coroutineScope) {
-                    if (versionStates[compilerMetadata] != it) {
-                        versionStates[compilerMetadata] = it
+                Version(compilerMetadata, state, coroutineScope, chosenCompiler == compilerMetadata,
+                    onStateUpdate = {
+                        if (versionStates[compilerMetadata] != it) {
+                            versionStates[compilerMetadata] = it
+                        }
+                        if (chosenCompiler == compilerMetadata && it !is Downloaded) {
+                            chosenCompiler = null
+                            coroutineScope.launch { saveCurrentCompiler(localContext, chosenCompiler) }
+                        }
+                    },
+                    onChosenCompiler = {
+                        chosenCompiler =
+                            if (chosenCompiler == compilerMetadata) null else compilerMetadata
+                        coroutineScope.launch { saveCurrentCompiler(localContext, chosenCompiler) }
                     }
-                }
+                )
             }
         }
         PullRefreshIndicator(
@@ -110,7 +127,7 @@ fun VersionsSurface(
 }
 
 sealed class VersionState {
-    object NotLoaded : VersionState()
+    object NotDownloaded : VersionState()
     data class Downloading(val job: Job, val percents: Int?) : VersionState()
     data class Downloaded(val path: File) : VersionState()
     object Removing : VersionState()
@@ -118,93 +135,135 @@ sealed class VersionState {
 }
 
 @Composable
-private fun DrawVersion(
+private fun Version(
     compilerMetadata: CompilerMetadata,
     loadingState: VersionState,
     coroutineScope: CoroutineScope,
+    chosen: Boolean,
     onStateUpdate: (VersionState) -> Unit,
+    onChosenCompiler: () -> Unit,
 ) {
     Row(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
+            .clickable(enabled = loadingState is Downloaded) { onChosenCompiler() }
+            .let { if (chosen) it.background(color = MaterialTheme.colorScheme.secondary) else it }
             .padding(horizontal = 10.dp),
     ) {
-        Text(text = compilerMetadata.version)
+        Text(
+            text = compilerMetadata.version,
+            color = if (chosen) MaterialTheme.colorScheme.onSecondary else Color.Unspecified
+        )
         val applicationContext = LocalContext.current
         Row(verticalAlignment = Alignment.CenterVertically) {
             when (loadingState) {
-                is NotLoaded -> {
-                    Button(onClick = {
-                        val parentJob = Job()
-                        coroutineScope.launch(parentJob) {
-                            onStateUpdate(Downloading(parentJob, null))
-                            val downloaded =
-                                downloadVersion(
-                                    applicationContext,
-                                    compilerMetadata
-                                ) { received, total ->
-                                    val percents = (received * 100 / total).toInt()
-                                    onStateUpdate(Downloading(parentJob, percents))
-                                }
-                            onStateUpdate(Downloaded(downloaded))
-                        }
-                    }) {
-                        Text(text = "Download")
-                    }
-                }
-                is Downloading -> {
-                    Text(
-                        text = loadingState.percents?.let { "Loading: $it%" } ?: "Loading...",
-                        modifier = Modifier.padding(end = 3.dp)
-                    )
-                    Button(
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.Red.copy(red = 0.8f)),
-                        onClick = {
-                            loadingState.job.cancel()
-                            onStateUpdate(Cancelling)
-                            coroutineScope.launch {
-                                loadingState.job.join()
-                                onStateUpdate(NotLoaded)
-                            }
-                        }
-                    ) {
-                        Text(text = "Cancel")
-                    }
-                }
-                is Downloaded -> {
-                    Text(text = "Downloaded", modifier = Modifier.padding(end = 3.dp))
-                    Button(
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.Green.copy(green = 0.5f)),
-                        onClick = {
-                            onStateUpdate(Removing)
-                            coroutineScope.launch {
-                                removeVersion(loadingState.path)
-                                onStateUpdate(NotLoaded)
-                            }
-                        }
-                    ) {
-                        Text(text = "Remove")
-                    }
-                }
-                is Removing -> {
-                    Button(
-                        enabled = false,
-                        onClick = { }
-                    ) {
-                        Text(text = "Removing...")
-                    }
-                }
-                is Cancelling -> {
-                    Button(
-                        enabled = false,
-                        onClick = { }
-                    ) {
-                        Text(text = "Cancelling...")
-                    }
-                }
+                is NotDownloaded -> NotDownloadedVersionButtonSide(
+                    coroutineScope, onStateUpdate, applicationContext, compilerMetadata
+                )
+                is Downloading -> DownloadingVersionButtonSide(loadingState, onStateUpdate, coroutineScope)
+                is Downloaded -> DownloadedVersionButtonSide(chosen, onStateUpdate, coroutineScope, loadingState)
+                is Removing -> RemovingVersionButtonSide()
+                is Cancelling -> CancellingVersionButtonSide()
             }
         }
+    }
+}
+
+@Composable
+private fun NotDownloadedVersionButtonSide(
+    coroutineScope: CoroutineScope,
+    onStateUpdate: (VersionState) -> Unit,
+    applicationContext: Context,
+    compilerMetadata: CompilerMetadata
+) {
+    Button(onClick = {
+        val parentJob = Job()
+        coroutineScope.launch(parentJob) {
+            onStateUpdate(Downloading(parentJob, null))
+            val downloaded =
+                downloadVersion(
+                    applicationContext,
+                    compilerMetadata
+                ) { received, total ->
+                    val percents = (received * 100 / total).toInt()
+                    onStateUpdate(Downloading(parentJob, percents))
+                }
+            onStateUpdate(Downloaded(downloaded))
+        }
+    }) {
+        Text(text = "Download")
+    }
+}
+
+@Composable
+private fun DownloadingVersionButtonSide(
+    loadingState: Downloading,
+    onStateUpdate: (VersionState) -> Unit,
+    coroutineScope: CoroutineScope
+) {
+    Text(
+        text = loadingState.percents?.let { "Loading: $it%" } ?: "Loading...",
+        modifier = Modifier.padding(end = 3.dp)
+    )
+    Button(
+        colors = ButtonDefaults.buttonColors(containerColor = Color.Red.copy(red = 0.8f)),
+        onClick = {
+            loadingState.job.cancel()
+            onStateUpdate(Cancelling)
+            coroutineScope.launch {
+                loadingState.job.join()
+                onStateUpdate(NotDownloaded)
+            }
+        }
+    ) {
+        Text(text = "Cancel")
+    }
+}
+
+@Composable
+private fun DownloadedVersionButtonSide(
+    chosen: Boolean,
+    onStateUpdate: (VersionState) -> Unit,
+    coroutineScope: CoroutineScope,
+    loadingState: Downloaded
+) {
+    Text(
+        text = "Downloaded",
+        modifier = Modifier.padding(end = 3.dp),
+        color = if (chosen) MaterialTheme.colorScheme.onSecondary else Color.Unspecified
+    )
+    Button(
+        colors = ButtonDefaults.buttonColors(containerColor = Color.Green.copy(green = 0.5f)),
+        onClick = {
+            onStateUpdate(Removing)
+            coroutineScope.launch {
+                removeVersion(loadingState.path)
+                onStateUpdate(NotDownloaded)
+            }
+        }
+    ) {
+        Text(text = "Remove")
+    }
+}
+
+@Composable
+private fun RemovingVersionButtonSide() {
+    Button(
+        enabled = false,
+        onClick = { }
+    ) {
+        Text(text = "Removing...")
+    }
+}
+
+@Composable
+private fun CancellingVersionButtonSide() {
+    Button(
+        enabled = false,
+        onClick = { }
+    ) {
+        Text(text = "Cancelling...")
     }
 }

@@ -1,6 +1,7 @@
 package com.zhelenskiy.kotlin_playground
 
 import android.content.Context
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -46,7 +47,14 @@ fun VersionsSurface(
         refreshing = true
 
         val oldStates = versionStates.toMap()
-        val newVersions = loadKotlinCompilerVersionsMetadata(localContext)
+        val newVersions = try {
+            loadKotlinCompilerVersionsMetadata(localContext)
+        } catch (e: Exception) {
+            val message = "Cannot retrieve available compiler versions: ${e.message}"
+            Toast.makeText(localContext, message, Toast.LENGTH_LONG).show()
+            refreshing = false
+            return@withContext
+        }
         val newStates = newVersions.associateWith {
             async(Dispatchers.IO) {
                 when (val state = oldStates[it]) {
@@ -182,14 +190,17 @@ private fun NotDownloadedVersionButtonSide(
         val parentJob = Job()
         coroutineScope.launch(parentJob) {
             onStateUpdate(Downloading(parentJob, null))
-            val downloaded =
-                downloadVersion(
-                    applicationContext,
-                    compilerMetadata
-                ) { received, total ->
+            val downloaded = try {
+                downloadVersion(applicationContext, compilerMetadata) { received, total ->
                     val percents = (received * 100 / total).toInt()
                     onStateUpdate(Downloading(parentJob, percents))
                 }
+            } catch (e: Exception) {
+                val message = "Version ${compilerMetadata.version} cannot be downloaded: ${e.message}"
+                Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
+                onStateUpdate(NotDownloaded)
+                return@launch
+            }
             onStateUpdate(Downloaded(downloaded))
         }
     }) {

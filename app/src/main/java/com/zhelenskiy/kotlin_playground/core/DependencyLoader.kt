@@ -39,20 +39,16 @@ private data class Doc(
 @kotlinx.serialization.Serializable
 data class CompilerMetadata(val version: String, val timestamp: Long)
 
-suspend fun loadKotlinCompilerVersionsMetadata(applicationContext: Context): List<CompilerMetadata> =
-    try {
-        val compilerMetadata = makeRequestForKotlinCompilerVersions()
-        withContext(Dispatchers.IO) {
-            val compilersDirectory = File(applicationContext.filesDir, "compiler/")
-            compilersDirectory.mkdirs()
-            val timestamps = File(compilersDirectory, "timestamps.txt")
-            timestamps.writeText(Json.encodeToString(compilerMetadata))
-        }
-        compilerMetadata
-    } catch (e: Exception) {
-        e.printStackTrace()
-        listOf()
+suspend fun loadKotlinCompilerVersionsMetadata(applicationContext: Context): List<CompilerMetadata> {
+    val compilerMetadata = makeRequestForKotlinCompilerVersions()
+    withContext(Dispatchers.IO) {
+        val compilersDirectory = File(applicationContext.filesDir, "compiler/")
+        compilersDirectory.mkdirs()
+        val timestamps = File(compilersDirectory, "timestamps.txt")
+        timestamps.writeText(Json.encodeToString(compilerMetadata))
     }
+    return compilerMetadata
+}
 
 private suspend fun makeRequestForKotlinCompilerVersions() =
     webClient.get(kotlinVersionsUrl).body<WholeResponse>().response.docs.map {
